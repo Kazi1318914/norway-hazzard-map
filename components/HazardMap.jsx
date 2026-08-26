@@ -24,10 +24,17 @@ function snowDates() {
 
 function buildStyle(basemapKey, visible) {
   const base = BASEMAPS[basemapKey];
-  const sources = {
-    basemap: { type: "raster", tiles: base.tiles, tileSize: 256, attribution: base.attribution },
-  };
-  const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
+  const sources = {};
+  const layers = [];
+  // A basemap may stack a global layer under a national one, so Kartverket's
+  // Norway-only coverage does not leave the neighbouring countries blank.
+  if (base.under) {
+    sources["basemap-under"] = { type: "raster", tiles: base.under, tileSize: 256 };
+    layers.push({ id: "basemap-under", type: "raster", source: "basemap-under" });
+  }
+  // Attribution rides on the top source only, so it is not listed twice.
+  sources.basemap = { type: "raster", tiles: base.tiles, tileSize: 256, attribution: base.attribution };
+  layers.push({ id: "basemap", type: "raster", source: "basemap" });
   for (const h of HAZARD_LAYERS) {
     sources[h.id] = { type: "raster", tiles: [h.tiles], tileSize: 512 };
     layers.push({

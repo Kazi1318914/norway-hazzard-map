@@ -35,8 +35,10 @@ plot, and only one of them is worth acting on.
 Switch to Area mode to drop a circle of up to 50 km and count how many mapped
 hazard zones fall inside it.
 
-Either report can be exported to PDF. The export includes a topographic map of
-the location and one close-up map per hazard that was actually found.
+Either report can be exported to PDF. It opens in an overlay and hands itself to
+the browser's print dialog, so Save as PDF is the whole flow and there is no
+pop-up to unblock. The export includes a topographic map of the location and one
+close-up map per hazard that was actually found.
 
 Storm surge is scenario driven rather than a single extent. Pick a return period
 and a climate year, and the whole report re-scores against it. A site in Sandnes
@@ -63,14 +65,15 @@ implying the site is safe.
 | Weather and rainfall | Open-Meteo |
 | Precipitation radar | RainViewer |
 | Snow cover | NASA GIBS (MODIS) |
-| Addresses, place names, base map | Kartverket |
+| Addresses and place names | Kartverket |
+| Base map | Kartverket topograatone over Esri Light Gray |
 
 ## Layout
 
 ```
 app/
   page.js, layout.js, globals.css   page shell and all styling
-  api/risk/          point verdict: 5 hazards + warnings + weather/quakes
+  api/risk/          point verdict: 6 hazards + warnings + weather/quakes
   api/area/          circle screening: zone counts, quakes, radon sampling
   api/mapimage/      flattens base map + overlays into one PNG for the PDF
   api/placename/     reverse geocode a point to a place name
@@ -153,6 +156,22 @@ filter looks like it worked while doing nothing. BBOX and Intersects are applied
 properly, so screen a circle by polygonising it and using Intersects. A bounding
 box is not a substitute: its corners reach r times root two, and at a 5 km radius
 near Sandnes the box matched 7 surge polygons where the circle matched none.
+
+**Basemap tiles can fail without failing.** CARTO's keyless `light_all` now
+stamps "API KEY REQUIRED" across every tile while still answering 200 with a
+valid PNG, so nothing throws, no console warning appears, and the watermark
+simply shows up on the map. Kartverket fails the opposite way: outside Norway it
+answers 200 with a fully transparent tile, which leaves every neighbouring
+country blank. Because those tiles are transparent rather than white, the default
+basemap draws Esri's global gray underneath and Kartverket on top, so Norway
+keeps its detail and Sweden and Finland still exist.
+
+**Do not open the report in a pop-up.** `window.open` loses to pop-up blockers,
+to extensions, and to embedded browsers, and Chrome's transient user activation
+expires about 5 seconds after the click, so a slow map composite forfeits the
+right to open a window at all. An iframe needs no permission and cannot be
+blocked: the report's own script calls `window.print()` inside the frame, so the
+dialog covers the frame's document rather than the app around it.
 
 **Kartverket may be unreachable from outside Europe.** From Bangladesh it needs
 a Norway VPN. Address search and the daily warnings fail open when it is down,
