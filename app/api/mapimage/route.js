@@ -13,7 +13,7 @@
 // and (once inlined as a data: URI by the client) no network at print time.
 
 import { PNG } from "pngjs";
-import { HAZARD_LAYERS } from "../../../lib/layers";
+import { HAZARD_LAYERS, seaScenario, seaTiles } from "../../../lib/layers";
 
 export const runtime = "nodejs"; // pngjs needs zlib + Buffer
 export const dynamic = "force-dynamic"; // reads searchParams
@@ -88,22 +88,27 @@ function blendPx(data, S, x, y, rgb, cov) {
 }
 
 /**
- * Dashed ring, anti-aliased. `ringFrac` is the ring DIAMETER as a fraction of
- * the image width, matching the old CSS `circleFrac`.
+ * Dashed ring, anti-aliased, centred anywhere.
+ *
+ * The centre is in pixels rather than assumed to be the middle of the image,
+ * because a per-hazard detail map is aimed at the hazard and not at the middle
+ * of the screening circle. The circle's edge then cuts across the frame at an
+ * offset, and often the centre is off-image entirely, so every pixel is clipped
+ * and the y range is clamped to the image.
  */
-function drawRing(data, S, ringFrac, width) {
-  const c = S / 2;
-  const r = (ringFrac * S) / 2;
-  if (r <= 1) return;
+function drawRing(data, S, cx, cy, r, width) {
+  if (!(r > 1)) return;
   const halfW = width / 2;
   const period = Math.max(10, Math.round(18 * (S / 640))); // dash cadence ~ CSS [2,1]
   const onLen = period * 0.62;
-  const yLo = Math.max(0, Math.floor(c - r - halfW - 2));
-  const yHi = Math.min(S - 1, Math.ceil(c + r + halfW + 2));
+  const yLo = Math.max(0, Math.floor(cy - r - halfW - 2));
+  const yHi = Math.min(S - 1, Math.ceil(cy + r + halfW + 2));
+  const xLo = Math.max(0, Math.floor(cx - r - halfW - 2));
+  const xHi = Math.min(S - 1, Math.ceil(cx + r + halfW + 2));
   for (let y = yLo; y <= yHi; y++) {
-    const dy = y + 0.5 - c;
-    for (let x = 0; x < S; x++) {
-      const dx = x + 0.5 - c;
+    const dy = y + 0.5 - cy;
+    for (let x = xLo; x <= xHi; x++) {
+      const dx = x + 0.5 - cx;
       const band = Math.abs(Math.hypot(dx, dy) - r);
       if (band > halfW + 1) continue;
       // arc position -> dash on/off
@@ -153,6 +158,10 @@ export async function GET(request) {
   const S = clamp(parseInt(q.get("size"), 10) || 768, 256, 1280);
   const ring = parseFloat(q.get("ring"));
   const pin = q.get("pin") === "1";
+  // A geographic ring, for detail maps that are not centred on the circle.
+  const ringLng = parseFloat(q.get("ringlng"));
+  const ringLat = parseFloat(q.get("ringlat"));
+  const ringKm = parseFloat(q.get("ringkm"));
 
   // Resolve overlay ids against our own layer list — never accept a URL, or
   // this endpoint becomes an open image proxy (SSRF).
@@ -160,7 +169,16 @@ export async function GET(request) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const layers = ids.map((id) => HAZARD_LAYERS.find((l) => l.id === id)).filter(Boolean).slice(0, 4);
+  // The surge layer renders one scenario at a time, and HAZARD_LAYERS only
+  // carries the default. Resolve the requested scenario through seaScenario(),
+  // which falls back to the default for anything unrecognised, so no
+  // caller-supplied string ever reaches an outbound URL.
+  const seaId = seaScenario(q.get("sea")).id;
+  const layers = ids
+    .map((id) => HAZARD_LAYERS.find((l) => l.id === id))
+    .filter(Boolean)
+    .map((l) => (l.id === "sea-level" ? { ...l, tiles: seaTiles(seaId) } : l))
+    .slice(0, 4);
 
   const m = toMerc3857(lng, lat);
   const bbox = `${m.x - half},${m.y - half},${m.x + half},${m.y + half}`;
@@ -203,7 +221,25 @@ export async function GET(request) {
   }
 
   // 4. Decor, drawn straight into the pixels.
-  if (isFinite(ring) && ring > 0 && ring <= 1) drawRing(out.data, S, ring, Math.max(2, 2.5 * (S / 640)));
+  const ringW = Math.max(2, 2.5 * (S / 640));
+  // `ring` is the DIAMETER as a fraction of image width, for a circle centred on
+  // the image. Used by the overview map.
+  if (isFinite(ring) && ring > 0 && ring <= 1) drawRing(out.data, S, S / 2, S / 2, (ring * S) / 2, ringW);
+  // A geographic ring instead: project its centre and radius into pixels. Off
+  // image is fine and normal, since drawRing clips. Mercator metres shrink with
+  // latitude, so the radius is inflated by 1/cos(lat) to mean ground distance.
+  if (isFinite(ringLng) && isFinite(ringLat) && isFinite(ringKm) && ringKm > 0) {
+    const rc = toMerc3857(ringLng, ringLat);
+    const perPx = (2 * half) / S;
+    drawRing(
+      out.data,
+      S,
+      (rc.x - (m.x - half)) / perPx,
+      (m.y + half - rc.y) / perPx,
+      (ringKm * 1000) / Math.cos((ringLat * Math.PI) / 180) / perPx,
+      ringW
+    );
+  }
   if (pin) drawPin(out.data, S);
 
   // colorType 2 (RGB, no alpha): ~15% smaller and structurally guarantees the
