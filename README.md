@@ -1,298 +1,168 @@
-# Norway Hazard Map 🇳🇴
+# Norway Hazard Map
 
-An interactive web map of Norway's **natural-hazard zones** — flood, quick-clay
-landslide, snow avalanche, rockfall and debris-flood — for screening
-real-estate sites. Built on **open government data** (no API keys, no cost).
+An interactive map for checking whether a Norwegian property sits in a natural
+hazard zone: flood, landslide, quick clay, avalanche, rockfall, radon or coastal
+storm surge.
 
-> Why this matters: Norwegian building regulations (TEK17 §7) require that you
-> assess natural-hazard exposure before you build. This map makes that exposure
-> visible at a glance.
+Norwegian building rules (TEK17 §7) require you to assess natural hazard
+exposure before you build, and the state publishes all of that data for free.
+This puts it on one map, so "is this plot safe to build on" takes a few seconds
+instead of an afternoon of separate map portals.
 
-## Data sources (all free, no key)
+Everything runs on open data. There are no API keys anywhere.
 
-All hazard services are hosted at **`https://gis3.nve.no/map/rest/services`**
-(verified live). The map calls each service's ArcGIS REST `export` endpoint, so
-**you host no data** — overlays render straight from NVE's servers.
-
-| Layer | Source | Service |
-|---|---|---|
-| Flood zones | NVE | `Mapservices/FlomsoneKart2` |
-| Landslide & quick-clay zones | NVE | `Skredfaresoner3` |
-| Snow avalanche susceptibility | NVE | `SnoskredAktsomhet` |
-| Rock avalanche | NVE | `Fjellskred1` |
-| Radon susceptibility | NGU | `RadonWMS2` (WMS, no key) |
-| Live flood/landslide warnings | NVE Varsom | `api01.nve.no` warning API |
-| Precipitation radar (live) | RainViewer | `weather-maps.json` (no key) |
-| Snow cover (satellite) | NASA GIBS | `MODIS_Terra_NDSI_Snow_Cover` (no key) |
-| Earthquakes (M2+, since 1990) | USGS | `fdsnws/event` GeoJSON (no key) |
-| Address search | Kartverket | `ws.geonorge.no/adresser` (no key) |
-| Basemap | Kartverket / Carto | `topograatone` / `light_all` |
-
-> Heads-up: `nve.geodataonline.no` (an older NVE host) no longer resolves —
-> if you find tutorials using it, swap in `gis3.nve.no/map/rest/services`.
+Live at https://norway-hazzard-map.vercel.app
 
 ## Run it
 
 ```bash
-cd norway-hazard-map
 npm install
 npm run dev
-# open http://localhost:3000
 ```
 
-## Project layout
+Then open http://localhost:3000.
+
+## What it does
+
+Search an address or click the map, and you get a verdict for six hazard types
+at that exact point, plus today's official warning level for the county and the
+current weather, yearly rainfall and nearby earthquake history.
+
+When a hazard misses, the report says by how much. "No flood zone here" and "no
+flood zone here, the nearest is 350 m away" are very different facts about a
+plot, and only one of them is worth acting on.
+
+Switch to Area mode to drop a circle of up to 50 km and count how many mapped
+hazard zones fall inside it.
+
+Either report can be exported to PDF. The export includes a topographic map of
+the location and one close-up map per hazard that was actually found.
+
+Storm surge is scenario driven rather than a single extent. Pick a return period
+and a climate year, and the whole report re-scores against it. A site in Sandnes
+sits above today's 200-year surge and inside the same surge once 2100 sea level
+rise is added, which is the difference TEK17 expects you to plan for.
+
+On the map itself you can toggle the six hazard layers plus live precipitation
+radar, satellite snow cover and recorded earthquakes. The radar, snow and
+earthquake layers each have their own timeline, so you can scrub the radar
+through the last two hours while earthquakes sit parked in 1994.
+
+Clicks outside Norway say so, rather than reporting "no hazards found" and
+implying the site is safe.
+
+## Data sources
+
+| Layer | Source |
+| --- | --- |
+| Flood zones, landslide and quick clay, snow avalanche, rock avalanche | NVE (`gis3.nve.no`) |
+| Radon susceptibility | NGU (`geo.ngu.no`) |
+| Storm surge and sea level rise | Kartverket (`wms.geonorge.no`, `wfs.geonorge.no`) |
+| Daily flood and landslide warnings | NVE Varsom (`api01.nve.no`) |
+| Earthquakes | USGS |
+| Weather and rainfall | Open-Meteo |
+| Precipitation radar | RainViewer |
+| Snow cover | NASA GIBS (MODIS) |
+| Addresses, place names, base map | Kartverket |
+
+## Layout
 
 ```
-lib/layers.js          ← all data sources live here (edit this to add/fix layers)
-components/HazardMap.jsx ← MapLibre map + layer toggles + legend
-app/page.js            ← loads the map client-side (MapLibre needs window)
-app/layout.js          ← page shell + metadata
-app/globals.css        ← styling
+app/
+  page.js, layout.js, globals.css   page shell and all styling
+  api/risk/          point verdict: 5 hazards + warnings + weather/quakes
+  api/area/          circle screening: zone counts, quakes, radon sampling
+  api/mapimage/      flattens base map + overlays into one PNG for the PDF
+  api/placename/     reverse geocode a point to a place name
+  api/geocode/       address search
+  api/weather/       radar frame list
+  api/earthquakes/   quake history
+components/HazardMap.jsx   the map, the UI, and the PDF builder
+lib/layers.js              every layer definition lives here
+lib/norway-border.js       offline point-in-polygon border check
 ```
 
-To **add a hazard layer**: copy a block in `lib/layers.js`, change `id`,
-`label`, `color`, and the service name. Browse more NVE services at
-<https://nve.geodataonline.no/arcgis/rest/services>.
+To add or fix a hazard layer, `lib/layers.js` is the only file you need.
 
-## Verify / browse the endpoints
+## Gotchas
 
-To confirm a service or find new ones:
+These cost me real time, so they are written down.
 
-```bash
-# List every NVE hazard service:
-curl -s "https://gis3.nve.no/map/rest/services?f=json"
-curl -s "https://gis3.nve.no/map/rest/services/Mapservices?f=json"
+**Use `gis3.nve.no/map/rest/services`.** Plenty of tutorials point at
+`nve.geodataonline.no`, which no longer resolves at all.
 
-# Check one service returns a PNG (200 + image/png):
-curl -s -o /dev/null -w "%{http_code} %{content_type}\n" \
-  "https://gis3.nve.no/map/rest/services/Mapservices/FlomsoneKart2/MapServer/export?bbox=445278,7741000,3450000,11800000&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image"
-```
+**NVE sublayers are invisible by default.** Most hazard MapServers ship with
+every sublayer set to `defaultVisibility=false`, so an `export` request renders
+a blank PNG unless you pass `layers=show:<ids>`. Only `Skredfaresoner3` works
+without it.
 
-Browse the full catalog in a browser at
-<https://gis3.nve.no/map/rest/services>, then update `lib/layers.js`.
+**NVE layers are scale gated.** Flood stops drawing above 1:160 000 and snow
+avalanche above 1:80 000, so a wide extent returns an empty image even where
+the data exists. Two consequences: the map hides those layers until you zoom in,
+and the PDF close-ups shrink their own extent until they clear the threshold.
+For counting zones across an area, query the features instead of measuring
+pixels, since a query ignores scale entirely.
 
-If the Kartverket basemap looks blank, switch to the **Carto Light** fallback in
-the basemap dropdown, or check the current tile URL at
-<https://kartkatalog.geonorge.no>.
+**A mapped area is not a hazard.** Several services include coverage polygons
+(`Dekningskart`, `Kartleggingsomrade`, `Analyseomrade`, `PotensieltSkredfareOmr`)
+that only mean "somebody surveyed here". `PotensieltSkredfareOmr` covers most of
+the country including open sea. Counting those makes every click report an
+avalanche risk.
 
-## Click-to-score (done ✓)
+**Radon needs the class, not the presence.** Every square metre of Norway sits
+in some radon polygon. Only `aktsomhetgrad` 2 and 3 (Høy, Særlig høy) are worth
+flagging.
 
-Click anywhere on the map → a red marker drops and a verdict card scores the
-point against **all four hazard layers**: **flood**, **landslide & quick-clay**,
-**snow avalanche**, and **rock avalanche**.
+**PDF maps are composited on the server for a reason.** Chrome's print
+rasterizer can render a translucent, rounded, transformed overlay as its own
+layer without the backdrop behind it, which paints a white hole over the map in
+the saved PDF while the same page looks perfect on screen. `api/mapimage`
+flattens the base map, overlays and markers into one opaque PNG, which the
+report then embeds as a data URI. The bug does not reproduce in headless Chrome,
+so a screenshot is not enough to test this.
 
-Each check excludes NVE "coverage / assessment-area" layers (e.g.
-`Dekningskart`, `Analyseomrade`, `PotensieltSkredfareOmr`) so being inside a
-*mapped* area isn't mistaken for being inside an actual *hazard zone*.
+**A flood zone's return period is in the layer name, not its attributes.** The
+`gjentaksinterval` field holds the climate year on the climate-adjusted layer, so
+`Flomsone_200ar_klima` reports 2100 and reads as a 2100-year flood, which is not
+a thing. Parse `Flomsone_(\d+)ar` from the layer name instead.
 
-The five hazard checks are **flood, landslide & quick-clay, snow avalanche, rock
-avalanche, and radon**. Radon reads the NGU class via WMS GetFeatureInfo (GML)
-and only flags `aktsomhetgrad ≥ 2` (Høy / Særlig høy) — *Moderat til lav* and
-*Usikker* areas are reported but not flagged. The rest use NVE ArcGIS `identify`.
+**Flood-exposed buildings are not a flood zone.** The same service publishes
+`Flomutsatte_bygg_*`, the individual buildings that flood, as points. Letting
+those set the verdict reports "inside a flood zone" for sites outside every zone.
+They are still worth mentioning separately, because the two datasets disagree: at
+Drammen a flood-exposed building sits within 50 m of a point whose nearest mapped
+zone is 1.9 km away.
 
-The card then shows **today's live warnings** (Varsom flood + landslide danger
-level for the point's county, via a Kartverket point→county lookup) and a
-**context** block (informational, not pass/fail):
+**Screen an area with a true circle, and keep the focus point inside it.** A
+bounding box over-counts badly (flood 120 zones versus 77, landslide 100 versus
+34) and returns features that only clip a corner. ArcGIS takes a point plus
+`distance`, which is the real circle. Aiming a detail map needs more care again:
+these polygons run far past the query area, so a centroid or a first vertex lands
+outside the circle. Measure to the polygon's line segments, since a polygon can
+cross the circle with every vertex outside it.
 
-- **Weather now** — current temp / conditions / wind + **gusts** ([Open-Meteo](https://open-meteo.com), no key)
-- **Climate** — total precipitation over the past year (Open-Meteo archive)
-- **Earthquakes** — count + nearest M2+ quake within 50 km (USGS), over the
-  **same window as the earthquake timeline** (default last 12 months, or the
-  "from year" you set). The client passes that window start to `/api/risk`.
+**The storm surge service has its own traps.** `dekningsomrade` returns a feature
+at Lillehammer, far inland, so it means "inside the national product" rather than
+"surge reaches here". On the WFS, a `urn:ogc:def:crs:EPSG::4326` bbox is lat,lon
+and swapping it silently returns zero everywhere. Set `srsName` too: one feature
+came back as 1.6 MB in the native CRS and 2.7 KB in 4326.
 
-All run server-side in `/api/risk` in parallel with the hazard checks.
+**This WFS ignores DWithin instead of rejecting it.** The service advertises the
+operator, accepts the request and returns all 125 209 features, so a distance
+filter looks like it worked while doing nothing. BBOX and Intersects are applied
+properly, so screen a circle by polygonising it and using Intersects. A bounding
+box is not a substitute: its corners reach r times root two, and at a 5 km radius
+near Sandnes the box matched 7 surge polygons where the circle matched none.
 
-The card can be **minimized** (— collapses to just the verdict header) and
-**exported to PDF** (⤓ PDF opens a clean printable report → Save as PDF).
+**Kartverket may be unreachable from outside Europe.** From Bangladesh it needs
+a Norway VPN. Address search and the daily warnings fail open when it is down,
+so everything else keeps working.
 
-Each hazard layer shows the **zoom level it's visible at** (e.g. flood zones
-"visible at zoom 9+"), with a live zoom readout and a "🔍 Zoom in to see" nudge
-when an enabled layer needs more zoom.
+**Clear `.next` if edits do not show up.** `next build` and `next dev` share
+that directory, and a stale cache serves old chunks.
 
-How it works: the browser calls `/api/risk?lng=..&lat=..`
-([app/api/risk/route.js](app/api/risk/route.js)), which queries NVE's ArcGIS
-`identify` endpoint **server-side** (avoids browser CORS) for each hazard
-service and returns a clean verdict. Try **Lillestrøm** (`11.05, 59.955`) for a
-flood hit, or **Trondheim** for quick-clay.
+## Ideas
 
-## Norway-only gate (done ✓)
-
-Clicks outside Norway return *"Outside Norway — this map only covers Norwegian
-data"* instead of a misleading "✓ no hazards". The check is an **offline
-point-in-polygon** against a bundled Norway boundary
-([lib/norway-border.js](lib/norway-border.js), ~110 m precision, + Svalbard /
-Jan Mayen boxes) — no dependency on a flaky external API, so an outage can't
-falsely flag all of Norway as "outside".
-
-## Area screening — draw a circle (done ✓)
-
-A **Point / Area** mode toggle. In Area mode, click the map to drop a circle
-(radius slider, max 50 km) and get a regional breakdown via
-[/api/area](app/api/area/route.js):
-
-- **Hazard zones** — how many mapped zones of each hazard intersect the circle,
-  via scale-independent ArcGIS `query` (count). (Pixel-% coverage was dropped:
-  most NVE layers are `minScale`-gated and don't render at a 25–50 km extent.)
-- **Earthquakes** — count + strongest within the radius (USGS, radius-native).
-- **Radon** — class sampled at the centre + 4 points.
-
-> Important NVE quirk: most hazard MapServers have **all sublayers
-> `defaultVisibility=false`**, so the `export` renders nothing unless the URL
-> passes `layers=show:<ids>` (see `nveExport` in [lib/layers.js](lib/layers.js)).
-> Flood/snow/rock are also `minScale`-gated, hence the per-layer zoom hints.
-
-The circle complements the point score; switching modes clears the other. The
-map auto-zooms to frame the chosen radius, and the area card can be minimized or
-exported to PDF (earthquakes in the area honour the same window as the
-earthquake timeline).
-
-## PDF reports
-
-Both the point and area cards export a styled PDF (browser print → Save as PDF):
-a branded header, a **Kartverket topo map image** of the location (with NVE
-hazard overlays + a centre marker / area circle), the hazard findings table,
-live warnings / context, and a linked **Data sources** section.
-
-### The map is composited server-side — and why
-
-The report map is built by [/api/mapimage](app/api/mapimage/route.js): it fetches
-the Kartverket base PNG plus any hazard-overlay PNGs, alpha-composites them with
-`pngjs`, draws the dashed ring and centre pin **into the pixels**, and returns
-one **fully opaque** PNG (`colorType: 2`). The client inlines it as a `data:` URI.
-
-This is not gold-plating. The report map used to be a stack of
-absolutely-positioned cross-origin `<img>`s plus a CSS circle that combined
-`transform`, `border-radius` and a translucent `background`. Chrome's print
-rasterizer promotes such an element to its own composited layer and can
-rasterize it **without its backdrop** — the layer's white backing then painted
-over the map, so the saved PDF showed a white disc while the same page looked
-perfect on screen. Flattening to a single opaque bitmap removes the whole class
-of failure: no transparency, no transforms, no stacking contexts, and no network
-at print time.
-
-Note: this reproduces only in *interactive* Chrome. Headless
-`--print-to-pdf` uses a software compositing path and renders the old markup
-correctly, so it cannot be used to verify this specific fix.
-
-`pdfMapImageFallback` keeps a hardened version of the old cross-origin stack
-(stroke-only SVG decor, no translucent fill) for when the composite endpoint is
-unreachable; the card then shows "Map composite unavailable — used a basic map."
-
-Because the composite takes a moment, the PDF button shows a spinner and
-disables while working, and the report window is opened **synchronously** before
-the fetch — Chrome's transient user activation expires in ~5 s, so opening it
-afterwards would be blocked.
-
-### Report pagination
-
-The report is laid out as three page groups so nothing important gets split:
-
-1. header + overview map + hazard table
-2. **all detail maps** (`.detail-page` starts a new page; each `.dfig` has
-   `break-inside:avoid`, so a 2-up row that doesn't fit moves whole to page 3)
-3. **context + data sources + disclaimer** (`.tail-page`), grouped so the
-   sources list can't strand a single bullet on a final page
-
-Two sizing constraints exist purely to make that work: `.mapwrap` is capped at
-**150 mm** (at the 760 px body width the overview map printed ~188 mm tall and
-pushed the hazard table onto its own page, orphaning one row), and `table` has
-`break-inside:avoid` as a backstop. The tail only forces a page break when
-detail maps exist, so a clean site doesn't get a near-empty page.
-
-### Per-hazard detail maps
-
-Below the overview map, the report adds **one detail map per hazard actually
-present** (a clean site gets none, keeping the PDF small).
-
-Spans are capped at `DETAIL_MAX_KM` (20 km). Without that, an *ungated* layer
-like landslide would reuse the full requested extent — on a 50 km circle that
-produced a 115 km-wide "detail" map, wider than the circle itself.
-
-Each thumbnail **auto-zooms to a scale where its layer actually renders**. NVE
-suppresses several sublayers above a scale threshold — flood at 1:160 000, snow
-avalanche at 1:80 000, rock avalanche at 1:320 000 (recorded as `maxScale` in
-[lib/layers.js](lib/layers.js)) — so a wide extent silently returns an empty
-PNG. `detailHalfFor()` shrinks the extent until it clears that gate, which is
-why the thumbnails differ in span (flood ≈15 km, snow ≈7.5 km) and why each
-caption states its own scale.
-
-For the **area** report the circle itself (25–50 km ≈ 1:565 000) is far above
-every gate, so a full-circle hazard map is impossible — rendering one would need
-a ~2700 px raster. Instead each detail map is aimed at where that hazard
-actually is, using a focus point from [/api/area](app/api/area/route.js), and the
-caption says so ("detail near Fretheim — not the full circle").
-
-Captions name the place rather than printing coordinates, via
-[/api/placename](app/api/placename/route.js) (Kartverket stedsnavn). That
-register is extremely granular — the *closest* name to an arbitrary point is
-often a single boulder or knoll ("Vatnasteinane", type `Stein`) — so candidates
-are ranked by feature **type** first (settlement → farm → landform) and only
-then by distance. When the chosen name is ≥1.2 km away the caption keeps the
-distance visible ("detail 1.9 km from Vikesland") so a nearby label can't be
-misread as the exact spot; if nothing resolves it falls back to coordinates.
-
-That focus point is the ring centroid of **one real feature**, not the bounding
-box of all matches: with features scattered around a 25 km circle the bbox
-centre usually lands in a gap between them. Measured on snow avalanche at
-Lillestrøm, the bbox centre rendered **0.01 %** hazard coverage versus **1.94 %**
-for a real feature — i.e. the difference between a blank thumbnail and a useful
-one.
-
-### Writing style in the report
-
-Report copy is kept plain and free of the usual generated-text tells. Concretely:
-no em or en dashes, straight quotes, no bolded label-and-value lists (the data
-sources are written as a paragraph), real sentences instead of fragments like
-"Screening only" or "lookup failed", and proper plurals rather than "zone(s)".
-Headings say what they contain ("Conditions and history", not "Context").
-
-Locations are named, not numbered. The area report header reads "Centred on
-Fretheim, Aurland (60.85780, 7.10960), covering everything within 50 km" with
-the coordinates kept in brackets so the area is still reproducible. Norwegian
-radon classes are glossed for readers who don't speak Norwegian, e.g. *Usikker
-aktsomhet (uncertain, not surveyed in detail)*.
-
-### Weather and earthquake reporting
-
-- **Weather** is stamped with its observation time in the site's own timezone
-  (Open-Meteo `timezone=auto`), e.g. *"Weather at 2026-08-22 12:45 GMT+2"* — a
-  reading without a timestamp is not interpretable.
-- **Earthquakes** report the **most recent** event rather than the nearest or
-  strongest, e.g. *"Most recent: M3.9, 12 km away on 2026-04-26"*, since "has
-  anything happened here lately" is the question a reader actually has.
-
-## Address search (done ✓)
-
-Type an address → debounced lookup via `/api/geocode`
-([app/api/geocode/route.js](app/api/geocode/route.js), proxying Kartverket) →
-pick a result → the map flies there, drops a marker, and runs the risk score.
-
-## Live weather radar (done ✓)
-
-The **Precipitation radar (LIVE)** toggle adds a real-time rain/snow radar
-overlay from RainViewer. `/api/weather`
-([app/api/weather/route.js](app/api/weather/route.js)) resolves the latest radar
-frame at runtime (the frame path rotates), and the layer sits under the hazard
-polygons so both are readable.
-
-## Per-layer timelines (done ✓)
-
-Each time-aware layer has its **own independent timeline** — a play button +
-scrubber that appears inline under the layer when it's enabled. They run
-simultaneously: you can loop the radar while earthquakes sit parked in 1994 and
-snow holds at today.
-
-- **🌍 Quakes** — defaults to the **last 12 months**; a *"from year"* input lets
-  you set the window start (e.g. 2000 → today), with a "12 mo" reset. Quakes
-  accumulate across the window as the slider advances (filter on `time`).
-- **❄️ Snow** — 12 monthly steps; swaps the NASA GIBS tile date so you watch
-  snow advance and melt.
-- **🌧️ Radar** — loops RainViewer's last ~2 hours of frames.
-
-Implemented in [components/HazardMap.jsx](components/HazardMap.jsx): per-layer
-state lives in the `tl` object (`{quakes,snow,radar}` → `{step,max,playing}`),
-`applyFor(layer, step)` updates the map, one effect drives all playing loops.
-
-## Roadmap ideas
-- **Sea-level rise** — Kartverket "Se havnivå" for coastal flooding.
-- **Climate projections** — met.no Frost API for future precipitation/extremes.
+- Distance to the nearest zone for radon, which needs a different approach since
+  every point in Norway is already inside some radon polygon
+- Reconcile flood-exposed buildings that no published zone covers

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { HAZARD_LAYERS, BASEMAPS, INITIAL_VIEW } from "../lib/layers";
+import { HAZARD_LAYERS, BASEMAPS, INITIAL_VIEW, SEA_DEFAULT, SEA_GROUPS, seaScenario, seaTiles } from "../lib/layers";
 
 const WEATHER_BEFORE = HAZARD_LAYERS[0]?.id; // overlays sit under hazard polygons
 const QUAKE_STEPS = 200;
@@ -90,18 +90,33 @@ const RISK_ID_TO_LAYER = {
   snow: "snow-avalanche",
   rock: "rock-avalanche",
   radon: "radon",
+  // radon and sea-level happen to use the same id on both sides; listed anyway
+  // so the mapping stays exhaustive and a missing entry is obvious.
+  "sea-level": "sea-level",
 };
 
 /** Query string for the server-side flattened report map. */
-function mapImageQuery(lng, lat, halfMeters, overlayIds, ring, pin, sizePx) {
+function mapImageQuery(lng, lat, halfMeters, overlayIds, ring, pin, sizePx, seaId, geoRing) {
   const p = new URLSearchParams({
     lng: String(lng),
     lat: String(lat),
     half: String(Math.round(halfMeters)),
     size: String(sizePx || PDF_MAP_PX),
   });
-  if (overlayIds && overlayIds.length) p.set("overlays", overlayIds.join(","));
+  if (overlayIds && overlayIds.length) {
+    p.set("overlays", overlayIds.join(","));
+    // The surge overlay is scenario-specific, so the report map has to be told
+    // which one the verdict was scored against.
+    if (overlayIds.includes("sea-level") && seaId) p.set("sea", seaId);
+  }
   if (ring) p.set("ring", String(ring));
+  // A circle that is NOT centred on this image: detail maps are aimed at the
+  // hazard, so the screening circle's edge cuts across them off-centre.
+  if (geoRing && isFinite(geoRing.km) && geoRing.km > 0) {
+    p.set("ringlng", String(geoRing.lng));
+    p.set("ringlat", String(geoRing.lat));
+    p.set("ringkm", String(geoRing.km));
+  }
   if (pin) p.set("pin", "1");
   return `/api/mapimage?${p.toString()}`;
 }
@@ -135,6 +150,12 @@ function detailHalfFor(layer, sizePx, requestedHalf, lat) {
     half = Math.min(half, capMerc);
   }
   return half;
+}
+
+/** Ground distance in km. Flat approximation, plenty at the 50 km maximum radius. */
+function apartKm(lng1, lat1, lng2, lat2) {
+  const kx = 111.32 * Math.cos((lat1 * Math.PI) / 180);
+  return Math.hypot((lng2 - lng1) * kx, (lat2 - lat1) * 110.57);
 }
 
 /** Ground width of a mercator half-extent, in km (mercator metres shrink by cos(lat)). */
@@ -198,10 +219,10 @@ function placeLabel(place, lng, lat) {
  * One detail map per hazard that is actually present. `items` are
  * { layerId, label, centre:[lng,lat], half, noteFor(whereLabel) }.
  */
-async function buildDetailMaps(items) {
+async function buildDetailMaps(items, seaId, geoRing) {
   const results = await Promise.all(
     items.map(async (it) => {
-      const url = mapImageQuery(it.centre[0], it.centre[1], it.half, [it.layerId], null, true, PDF_DETAIL_PX);
+      const url = mapImageQuery(it.centre[0], it.centre[1], it.half, [it.layerId], null, true, PDF_DETAIL_PX, seaId, geoRing);
       const [dataUrl, place] = await Promise.all([
         fetchMapDataUrl(url),
         it.needsPlace ? fetchPlaceName(it.centre[0], it.centre[1]) : Promise.resolve(null),
@@ -279,6 +300,8 @@ function pdfMapImageFallback(lng, lat, halfMeters, overlayIds, decor) {
   return `<div class="mapwrap stack"><img class="base" width="640" height="640" src="${esc(base)}" alt="map"/>${overlays}${svg}</div>`;
 }
 const REPORT_CSS = `
+/* Scenario meanings, so a printed report explains its own jargon. */
+td .note{display:block;margin-top:2px;font-size:.78em;color:#6b7280;line-height:1.35}
   *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body{font:13px/1.5 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif;color:#111827;max-width:760px;margin:0 auto;padding:0 22px 28px}
   .band{background:#0b3d6b;color:#fff;margin:0 -22px 16px;padding:20px 22px}
@@ -420,6 +443,11 @@ export default function HazardMap() {
   const [quakesOn, setQuakesOn] = useState(false);
   const [quakeStartMs, setQuakeStartMs] = useState(() => Date.now() - 365 * 86400000); // last 12 months
   const [quakeYear, setQuakeYear] = useState("");
+  // Storm surge is scenario-driven rather than time-driven: a return period
+  // crossed with a climate year. Held here so the map layer, both API calls and
+  // the PDF all score the same scenario.
+  const [seaId, setSeaId] = useState(SEA_DEFAULT);
+  const seaIdRef = useRef(SEA_DEFAULT);
   const [risk, setRisk] = useState(null);
   const [riskMin, setRiskMin] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
@@ -470,8 +498,26 @@ export default function HazardMap() {
     }
   }
 
+  // The surge scenario lives in a raster source, so switching it is a setTiles
+  // swap rather than a style rebuild. buildStyle() only knows the default, so
+  // this has to run again after every setStyle (basemap change) too.
+  function applySeaScenario(map, id) {
+    const src = map && map.getSource("sea-level");
+    if (src && src.setTiles) src.setTiles([seaTiles(id)]);
+  }
+
+  function onSeaChange(id) {
+    setSeaId(id);
+    seaIdRef.current = id;
+    applySeaScenario(mapRef.current, id);
+    // Any open verdict was scored against the old scenario, so re-score it.
+    if (mode === "point" && risk && !risk.outside && isFinite(risk.lng)) scoreLocation(risk.lng, risk.lat, false);
+    if (mode === "area" && areaCenterRef.current) fetchArea(areaCenterRef.current, areaRadiusRef.current);
+  }
+
   // Re-apply active overlays (and their current timeline step) after a setStyle.
   function reapplyOverlays(map) {
+    if (seaIdRef.current !== SEA_DEFAULT) applySeaScenario(map, seaIdRef.current);
     if (weatherOn) { ensureWeather(map); applyFor("radar", tl.radar.step); }
     if (snowOn) { ensureSnow(map); applyFor("snow", tl.snow.step); }
     if (quakesOn) { ensureQuakes(map); applyFor("quakes", tl.quakes.step); }
@@ -602,7 +648,7 @@ export default function HazardMap() {
     setRiskMin(false);
     setRisk({ loading: true, lng, lat });
     try {
-      const res = await fetch(`/api/risk?lng=${lng}&lat=${lat}&from=${quakeStartRef.current}`);
+      const res = await fetch(`/api/risk?lng=${lng}&lat=${lat}&from=${quakeStartRef.current}&sea=${seaIdRef.current}`);
       setRisk({ ...(await res.json()), loading: false });
     } catch {
       setRisk({ error: true, loading: false });
@@ -632,7 +678,7 @@ export default function HazardMap() {
     setArea({ loading: true, radius });
     try {
       const d = await (
-        await fetch(`/api/area?lng=${center[0]}&lat=${center[1]}&radius=${radius}&from=${quakeStartRef.current}`)
+        await fetch(`/api/area?lng=${center[0]}&lat=${center[1]}&radius=${radius}&from=${quakeStartRef.current}&sea=${seaIdRef.current}`)
       ).json();
       setArea({ ...d, loading: false });
     } catch {
@@ -877,8 +923,8 @@ export default function HazardMap() {
         };
       });
       const [dataUrl, detailHtml] = await Promise.all([
-        fetchMapDataUrl(mapImageQuery(risk.lng, risk.lat, halfPoint, present, null, true)),
-        buildDetailMaps(detailItems),
+        fetchMapDataUrl(mapImageQuery(risk.lng, risk.lat, halfPoint, present, null, true, PDF_MAP_PX, seaIdRef.current)),
+        buildDetailMaps(detailItems, seaIdRef.current),
       ]);
       if (win.closed) return;
       let mapHtml;
@@ -891,7 +937,8 @@ export default function HazardMap() {
       const hazRows = risk.hazards
         .map(
           (h) =>
-            `<tr><td class="ic ${h.inZone ? "hit" : "ok"}">${h.inZone ? "&#9888;" : "&#10003;"}</td><td class="lab">${esc(h.label)}</td><td>${esc(h.detail)}</td></tr>`
+            `<tr><td class="ic ${h.inZone ? "hit" : "ok"}">${h.inZone ? "&#9888;" : "&#10003;"}</td><td class="lab">${esc(h.label)}</td><td>${esc(h.detail)}` +
+            `${h.note ? `<span class="note">${esc(h.note)}</span>` : ""}</td></tr>`
         )
         .join("");
       const w = risk.warnings;
@@ -955,7 +1002,18 @@ export default function HazardMap() {
           if (!lyr) return null;
           const centre = h.focus ? [h.focus.lng, h.focus.lat] : center;
           const half = detailHalfFor(lyr, PDF_DETAIL_PX, halfM, centre[1]);
-          const span = groundWidthKm(half, centre[1]).toFixed(1);
+          const spanKm = groundWidthKm(half, centre[1]);
+          const span = spanKm.toFixed(1);
+          // Does the circle's edge actually cross this close-up? The frame is
+          // aimed at the hazard, so the edge is off-centre and often outside the
+          // frame entirely. Saying which it is stops the missing dashed line from
+          // reading as a bug.
+          const offCentreKm = apartKm(center[0], center[1], centre[0], centre[1]);
+          const cornerKm = (spanKm / 2) * Math.SQRT2;
+          const edgeShows = offCentreKm + cornerKm > area.radius;
+          const circleBit = edgeShows
+            ? ` The dashed line is the edge of the ${area.radius} km circle.`
+            : ` All of this view is inside the ${area.radius} km circle.`;
           return {
             layerId,
             label: lyr.label,
@@ -963,15 +1021,16 @@ export default function HazardMap() {
             half,
             needsPlace: !!h.focus, // resolve a place name for the caption
             noteFor: (where) =>
-              h.focus
+              (h.focus
                 ? `About ${span} km across, ${where}. This is a close-up, not the whole circle.`
-                : `About ${span} km across, at the centre of the circle. This is a close-up, not the whole circle.`,
+                : `About ${span} km across, at the centre of the circle. This is a close-up, not the whole circle.`) +
+              circleBit,
           };
         })
         .filter(Boolean);
       const [dataUrl, detailHtml, centrePlace] = await Promise.all([
         fetchMapDataUrl(mapImageQuery(center[0], center[1], halfM, [], 1 / 1.15, true)),
-        buildDetailMaps(detailItems),
+        buildDetailMaps(detailItems, seaIdRef.current, { lng: center[0], lat: center[1], km: area.radius }),
         fetchPlaceName(center[0], center[1]),
       ]);
       if (win.closed) return;
@@ -990,7 +1049,11 @@ export default function HazardMap() {
               : h.present
               ? `${plural(h.count, "mapped zone")} overlap this area.`
               : "Nothing mapped in this area.";
-          return `<tr><td class="ic ${h.present ? "hit" : "ok"}">${h.present ? "&#9888;" : "&#10003;"}</td><td class="lab">${esc(h.label)}</td><td>${say}</td></tr>`;
+          return (
+            `<tr><td class="ic ${h.present ? "hit" : "ok"}">${h.present ? "&#9888;" : "&#10003;"}</td>` +
+            `<td class="lab">${esc(h.label)}</td><td>${say}` +
+            `${h.note ? `<span class="note">${esc(h.note)}</span>` : ""}</td></tr>`
+          );
         })
         .join("");
       const ctx = [
@@ -1120,6 +1183,36 @@ export default function HazardMap() {
                       {needsZoom && <em className="zoom-nudge">🔍 Zoom in to see (needs zoom {h.minZoom}+)</em>}
                     </span>
                   </label>
+                  {/* Outside the <label>: a select nested in one competes with
+                      the checkbox for the click. */}
+                  {h.scenarios && (
+                    <>
+                      <select
+                        className="scenario"
+                        value={seaId}
+                        onChange={(e) => onSeaChange(e.target.value)}
+                        aria-label="Storm surge scenario"
+                      >
+                        {/* Grouped, because the list mixes two independent axes:
+                            how rare the storm is, and how much sea level rise
+                            is added on top. */}
+                        {SEA_GROUPS.map((g) => (
+                          <optgroup key={g} label={g}>
+                            {h.scenarios
+                              .filter((sc) => sc.group === g)
+                              .map((sc) => (
+                                <option key={sc.id} value={sc.id}>
+                                  {sc.label}
+                                </option>
+                              ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      {/* Always visible rather than a tooltip: the labels are
+                          jargon, and a hover hint is invisible on touch. */}
+                      <p className="scenario-what">{seaScenario(seaId).what}</p>
+                    </>
+                  )}
                 </li>
               );
             })}
@@ -1255,6 +1348,7 @@ export default function HazardMap() {
                     <span className="ic">{h.inZone === true ? "⚠️" : h.inZone === null ? "—" : "✓"}</span>
                     <span>
                       <strong>{h.label}.</strong> {h.detail}
+                      {h.note && <em className="haz-note">{h.note}</em>}
                     </span>
                   </li>
                 ))}

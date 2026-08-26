@@ -290,6 +290,48 @@ body {
   margin-top: 3px;
 }
 
+/* Storm-surge scenario picker. Indented to line up with the layer text, since
+   it sits outside the <label> grid that positions the checkbox and swatch. */
+.scenario {
+  margin: 6px 0 0 30px;
+  width: calc(100% - 30px);
+  font: inherit;
+  font-size: 0.78rem;
+  color: #0e7490;
+  background: #ecfeff;
+  border: 1px solid #a5f3fc;
+  border-radius: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.scenario:hover {
+  border-color: #67e8f9;
+}
+.scenario:focus-visible {
+  outline: 2px solid #0891b2;
+  outline-offset: 1px;
+}
+
+/* What the selected scenario actually means. Always on screen rather than a
+   title tooltip: the labels are jargon, and hover hints never appear on touch. */
+.scenario-what {
+  margin: 4px 0 0 30px;
+  width: calc(100% - 30px);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: #0e7490;
+}
+
+/* Secondary explanation under a hazard verdict in the result card. */
+.haz-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--muted);
+  font-style: normal;
+}
+
 .swatch {
   width: 14px;
   height: 14px;
