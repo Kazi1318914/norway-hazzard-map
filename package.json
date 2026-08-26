@@ -1,0 +1,19 @@
+{
+  "name": "norway-hazard-map",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Interactive map of Norway's natural-hazard zones (flood, quick-clay landslide, avalanche) for real-estate risk screening. Data: NVE + Kartverket (open).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.7.1",
+    "next": "^14.2.35",
+    "pngjs": "^7.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
