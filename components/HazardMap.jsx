@@ -360,30 +360,16 @@ const SOURCES_HTML = `<p class="src">
   base map uses OpenStreetMap data.
 </p>`;
 /**
- * Open the report window SYNCHRONOUSLY, inside the click handler, before any
- * await. Chrome's transient user activation expires in ~5s, so opening it after
- * a slow fetch gets the popup blocked.
+ * The report is rendered into an on-page iframe rather than a popup window.
+ *
+ * window.open() was the obvious approach and it was the wrong one. Pop-up
+ * blockers kill it, Chrome's transient user activation expires about 5 seconds
+ * after the click so a slow map composite loses the right to open a window at
+ * all, and embedded browsers refuse it outright. An iframe needs no permission,
+ * cannot be blocked, and prints the same: the report's own script calls
+ * window.print() inside the frame, so the dialog covers the frame's document and
+ * not the app around it.
  */
-function openPendingWindow() {
-  const w = window.open("", "_blank");
-  if (!w) return null;
-  w.document.open();
-  w.document.write(
-    `<!doctype html><html><head><meta charset="utf-8"><title>Generating report…</title>` +
-      `<style>body{font:14px/1.5 system-ui,sans-serif;color:#374151;display:flex;align-items:center;` +
-      `justify-content:center;height:100vh;margin:0}</style></head>` +
-      `<body>Building the map for this report…</body></html>`
-  );
-  w.document.close();
-  return w;
-}
-
-function writeReport(w, html) {
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
-}
-
 /**
  * `tailHtml` (context) plus sources and the disclaimer are grouped into one
  * block. When detail maps are present that block starts a new page, so the
@@ -434,7 +420,7 @@ export default function HazardMap() {
   const snowDatesRef = useRef(null);
   const searchTimer = useRef(null);
 
-  const [basemap, setBasemap] = useState("carto");
+  const [basemap, setBasemap] = useState("kartverket");
   const [visible, setVisible] = useState(() =>
     Object.fromEntries(HAZARD_LAYERS.map((h) => [h.id, h.defaultOn]))
   );
@@ -451,6 +437,9 @@ export default function HazardMap() {
   const [risk, setRisk] = useState(null);
   const [riskMin, setRiskMin] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  // The built report, shown in an overlay iframe. Null when nothing is open.
+  const [report, setReport] = useState(null);
+  const reportFrameRef = useRef(null);
   const [pdfErr, setPdfErr] = useState("");
   const [zoom, setZoom] = useState(INITIAL_VIEW.zoom);
 
@@ -884,16 +873,25 @@ export default function HazardMap() {
     areaCenterRef.current = null;
   }
 
+  function showReport(title, html) {
+    setReport({ title, html });
+  }
+
+  /**
+   * Print the iframe's document, not the page. The report's own script fires
+   * this once its images have loaded, so the button is for printing again after
+   * dismissing the dialog.
+   */
+  function printReport() {
+    const f = reportFrameRef.current;
+    if (!f || !f.contentWindow) return;
+    f.contentWindow.focus();
+    f.contentWindow.print();
+  }
+
   // Rich PDF for the point report.
   async function exportPdf() {
     if (!risk || risk.loading || risk.error || risk.outside || pdfBusy) return;
-    // Open the window first — see openPendingWindow(): after an await, Chrome
-    // treats the popup as unrequested and blocks it.
-    const win = openPendingWindow();
-    if (!win) {
-      setPdfErr("Allow pop-ups for localhost to export the PDF.");
-      return;
-    }
     setPdfBusy(true);
     setPdfErr("");
     try {
@@ -926,7 +924,6 @@ export default function HazardMap() {
         fetchMapDataUrl(mapImageQuery(risk.lng, risk.lat, halfPoint, present, null, true, PDF_MAP_PX, seaIdRef.current)),
         buildDetailMaps(detailItems, seaIdRef.current),
       ]);
-      if (win.closed) return;
       let mapHtml;
       if (dataUrl) {
         mapHtml = flatMapHtml(dataUrl);
@@ -958,8 +955,8 @@ export default function HazardMap() {
         risk.overall === "at-risk"
           ? `<div class="verdict bad">&#9888; This site falls inside ${risk.hitCount} mapped hazard zone${risk.hitCount > 1 ? "s" : ""}</div>`
           : `<div class="verdict ok">&#10003; No mapped hazard zone covers this site</div>`;
-      writeReport(
-        win,
+      showReport(
+        "Site report",
         buildReportHtml({
           title: "Norway Hazard Map: Site Report",
           subtitle: "Natural hazard screening for one property",
@@ -978,11 +975,6 @@ export default function HazardMap() {
   // Rich PDF for the area report.
   async function exportAreaPdf() {
     if (!area || area.loading || area.error || area.outside || pdfBusy) return;
-    const win = openPendingWindow();
-    if (!win) {
-      setPdfErr("Allow pop-ups for localhost to export the PDF.");
-      return;
-    }
     setPdfBusy(true);
     setPdfErr("");
     try {
@@ -1033,7 +1025,6 @@ export default function HazardMap() {
         buildDetailMaps(detailItems, seaIdRef.current, { lng: center[0], lat: center[1], km: area.radius }),
         fetchPlaceName(center[0], center[1]),
       ]);
-      if (win.closed) return;
       let mapHtml;
       if (dataUrl) {
         mapHtml = flatMapHtml(dataUrl);
@@ -1060,8 +1051,8 @@ export default function HazardMap() {
         area.quakes ? `<li>Earthquakes in this area: ${esc(area.quakes.text)}</li>` : "",
         area.radon ? `<li>Radon: ${esc(area.radon.text)}</li>` : "",
       ].join("");
-      writeReport(
-        win,
+      showReport(
+        `Area report, ${area.radius} km`,
         buildReportHtml({
           title: "Norway Hazard Map: Area Report",
           subtitle: `Natural hazard screening within ${area.radius} km`,
@@ -1449,6 +1440,23 @@ export default function HazardMap() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {report && (
+        <div className="report-overlay" role="dialog" aria-modal="true" aria-label={report.title}>
+          <div className="report-bar">
+            <strong>{report.title}</strong>
+            <span className="grow" />
+            <button onClick={printReport}>Print / Save as PDF</button>
+            <button className="ghost" onClick={() => setReport(null)}>
+              Close
+            </button>
+          </div>
+          {/* srcDoc keeps the report same-origin, so its own script can print it
+              and printReport() can reach contentWindow. Deliberately no sandbox
+              attribute: sandboxing blocks both. */}
+          <iframe ref={reportFrameRef} className="report-frame" srcDoc={report.html} title={report.title} />
         </div>
       )}
     </div>
